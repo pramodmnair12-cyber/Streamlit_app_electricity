@@ -2,16 +2,10 @@ import streamlit as st
 import pandas as pd
 import io
 
-# --- Configuration for Billing File Types ---
+# --- Configuration ---
+# Only defining Power Smart logic here as requested, 
+# but keeping structure expandable.
 BILLING_CONFIG = {
-    "Quarterly Billing": {
-        "header_row": 1,
-        "col_nmi": "NMI",
-        "suffixes": {
-            "P": {"start": "PEAK_KWH", "end": "PEAK_KWH.1"},
-            "A": {"qty": "Availability charge Quantity"}
-        }
-    },
     "Power Smart Billing": {
         "header_row": 1,
         "col_nmi": "NMI",
@@ -22,6 +16,7 @@ BILLING_CONFIG = {
             "A": {"qty": "Availability"}
         }
     },
+    # Kept for compatibility if needed later
     "Load Smart Billing": {
         "header_row": 1,
         "col_nmi": "NMI",
@@ -32,15 +27,33 @@ BILLING_CONFIG = {
             "D": {"qty": "DEMAND"},
             "A": {"qty": "Availability"}
         }
+    },
+     "Quarterly Billing": {
+        "header_row": 1,
+        "col_nmi": "NMI",
+        "suffixes": {
+            "P": {"start": "PEAK_KWH", "end": "PEAK_KWH.1"},
+            "A": {"qty": "Availability charge Quantity"}
+        }
     }
 }
+
+def clean_nmi(val):
+    """Robust cleaner for NMI strings."""
+    if pd.isna(val):
+        return ""
+    # Convert to string
+    s = str(val).strip()
+    # Remove decimal .0 if it exists (common in Excel imports)
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
 
 def process_meter_readings(billing_file, readings_file, billing_type):
     config = BILLING_CONFIG[billing_type]
     
-    # 1. Load the Billing Data
+    # 1. Load Billing Data
     try:
-        # Check if file is CSV or Excel
         if billing_file.name.endswith('.csv'):
             df_billing = pd.read_csv(billing_file, header=config["header_row"])
         else:
@@ -48,7 +61,7 @@ def process_meter_readings(billing_file, readings_file, billing_type):
     except Exception as e:
         return None, f"Error reading billing file: {e}"
 
-    # 2. Load the Readings File
+    # 2. Load Target File
     try:
         if readings_file.name.endswith('.csv'):
             df_target = pd.read_csv(readings_file)
@@ -58,36 +71,33 @@ def process_meter_readings(billing_file, readings_file, billing_type):
         return None, f"Error reading target file: {e}"
 
     # 3. Build Lookup Dictionary
+    # Key = Clean NMI, Value = Data Dictionary
     billing_lookup = {}
     suffixes_config = config["suffixes"]
 
     for index, row in df_billing.iterrows():
-        raw_nmi = row[config["col_nmi"]]
-        if pd.isna(raw_nmi):
+        nmi_val = row.get(config["col_nmi"])
+        nmi_clean = clean_nmi(nmi_val)
+        
+        if not nmi_clean:
             continue
-        
-        # Clean NMI
-        nmi_str = str(raw_nmi)
-        if nmi_str.endswith('.0'):
-            nmi_str = nmi_str[:-2]
             
-        # Store all relevant data for this NMI
+        # Store data for this NMI
         nmi_data = {}
-        
         for suffix, mapping in suffixes_config.items():
-            if "start" in mapping: # It's a reading range
+            if "start" in mapping: # Reading Range
                 nmi_data[suffix] = {
                     "start": row.get(mapping["start"]),
                     "end": row.get(mapping["end"])
                 }
-            elif "qty" in mapping: # It's a single quantity value
+            elif "qty" in mapping: # Quantity
                 nmi_data[suffix] = {
                     "qty": row.get(mapping["qty"])
                 }
         
-        billing_lookup[nmi_str] = nmi_data
+        billing_lookup[nmi_clean] = nmi_data
 
-    # 4. Update the Target DataFrame
+    # 4. Update Target
     matches_found = 0
     
     # Ensure columns exist
@@ -97,22 +107,26 @@ def process_meter_readings(billing_file, readings_file, billing_type):
         df_target['Reading To'] = None
         
     for index, row in df_target.iterrows():
-        meter_no = str(row['Meter No.'])
+        meter_val = row.get('Meter No.')
+        meter_clean = clean_nmi(meter_val)
         
-        if len(meter_no) < 2:
+        if len(meter_clean) < 2:
             continue
             
-        suffix = meter_no[-1] # Extract suffix (A, P, S, O, D)
-        nmi_base = meter_no[:-1]
+        # Extract NMI and Suffix
+        # Logic: Suffix is the last character. NMI is everything before it.
+        suffix = meter_clean[-1]
+        nmi_base = meter_clean[:-1]
         
+        # Check if we have data for this NMI
         if nmi_base in billing_lookup:
             nmi_data = billing_lookup[nmi_base]
             
-            # Check if this suffix is handled in our config
+            # Check if we have data for this Suffix (A, P, S, O, etc.)
             if suffix in nmi_data:
                 data = nmi_data[suffix]
                 
-                # Logic for Quantity Types (Availability, Demand)
+                # Apply Quantity Logic (Avail/Demand)
                 if "qty" in data:
                     val = data["qty"]
                     if pd.notna(val):
@@ -120,68 +134,46 @@ def process_meter_readings(billing_file, readings_file, billing_type):
                         df_target.at[index, 'Reading To'] = val
                         matches_found += 1
                         
-                # Logic for Reading Types (Peak, Shoulder, Off Peak)
+                # Apply Reading Logic (Peak/Shoulder/OffPeak)
                 elif "start" in data:
-                    start_val = data["start"]
-                    end_val = data["end"]
+                    s_val = data["start"]
+                    e_val = data["end"]
                     
-                    if pd.notna(start_val):
-                        df_target.at[index, 'Reading From'] = start_val
+                    updated = False
+                    if pd.notna(s_val):
+                        df_target.at[index, 'Reading From'] = s_val
+                        updated = True
+                    if pd.notna(e_val):
+                        df_target.at[index, 'Reading To'] = e_val
+                        updated = True
+                        
+                    if updated:
                         matches_found += 1
-                    if pd.notna(end_val):
-                        df_target.at[index, 'Reading To'] = end_val
 
     return df_target, matches_found
 
-# --- Streamlit UI Layout ---
-st.set_page_config(page_title="Meter Reading Populator")
-
+# --- UI ---
+st.set_page_config(page_title="Meter Mapper")
 st.title("⚡ Meter Reading Populator")
-st.markdown("""
-This tool populates the **Reading From** and **Reading To** columns in your Meter Readings file.
-Supports **Quarterly**, **Power Smart**, and **Load Smart** billing formats.
-""")
 
-st.divider()
+st.markdown("Matches billing data NMI to target file Meter No (NMI + Suffix).")
 
-# Step 1: Select Type
-st.subheader("1. Select Billing Type")
-billing_type = st.selectbox(
-    "Choose the format of your billing file:",
-    list(BILLING_CONFIG.keys())
-)
+billing_type = st.selectbox("Select Billing Type", list(BILLING_CONFIG.keys()))
 
 col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("2. Upload Billing File")
-    billing_file = st.file_uploader("Upload Billing CSV", type=['csv', 'xlsx'])
-
-with col2:
-    st.subheader("3. Upload Target File")
-    readings_file = st.file_uploader("Upload Meter Readings File", type=['csv', 'xlsx'])
+billing_file = col1.file_uploader("Billing File", type=['csv', 'xlsx'])
+readings_file = col2.file_uploader("Target Readings File", type=['csv', 'xlsx'])
 
 if billing_file and readings_file:
-    st.divider()
-    if st.button("Populate Readings", type="primary"):
-        with st.spinner("Processing data..."):
-            try:
-                result_df, count_or_error = process_meter_readings(billing_file, readings_file, billing_type)
+    if st.button("Populate"):
+        with st.spinner("Processing..."):
+            res_df, count = process_meter_readings(billing_file, readings_file, billing_type)
+            
+            if res_df is None:
+                st.error(count) # Error message
+            else:
+                st.success(f"Done! Updated {count} rows.")
+                st.dataframe(res_df.head())
                 
-                if result_df is None:
-                    st.error(count_or_error)
-                else:
-                    st.success(f"Success! Updated {count_or_error} entries.")
-                    
-                    st.subheader("Preview")
-                    st.dataframe(result_df[['Meter No.', 'Reading From', 'Reading To']].head(10))
-                    
-                    csv = result_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Populated File",
-                        data=csv,
-                        file_name="Populated_Meter_Readings.csv",
-                        mime="text/csv",
-                    )
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
+                csv = res_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV", csv, "Populated_Readings.csv", "text/csv")
