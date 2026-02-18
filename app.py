@@ -127,7 +127,7 @@ def process_meter_readings(billing_file, readings_file, billing_type):
                     
                     if pd.notna(start_val):
                         df_target.at[index, 'Reading From'] = start_val
-                        matches_found += 1 # Count match if at least start exists
+                        matches_found += 1
                     if pd.notna(end_val):
                         df_target.at[index, 'Reading To'] = end_val
 
