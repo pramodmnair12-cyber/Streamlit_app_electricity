@@ -125,122 +125,178 @@ def process_dataframes(df_billing, df_target, billing_type):
                         
     return df_target, matches_found, None
 
-def load_file(uploaded_file):
+def load_file(uploaded_file, header=0):
     """Helper to load csv or excel"""
     try:
         if uploaded_file.name.endswith('.csv'):
-            return pd.read_csv(uploaded_file)
+            return pd.read_csv(uploaded_file, header=header)
         else:
-            return pd.read_excel(uploaded_file)
+            return pd.read_excel(uploaded_file, header=header)
     except Exception as e:
         return None
 
 # --- UI ---
 st.set_page_config(page_title="Meter Mapper", layout="wide")
 st.title("⚡ Meter Reading Populator")
-st.markdown("""
-### Batch Processing
-1. Upload **ONE Billing Workbook** (containing multiple sheets).
-2. Upload **THREE Template Files** (Target Readings).
-3. Map the Billing Sheet to the Template.
-""")
 
-st.divider()
+# Create Tabs
+tab_single, tab_batch = st.tabs(["📂 Single File Mode", "📚 Batch Mode (Workbook)"])
 
-# 1. Billing Input
-st.subheader("1. Input Data (Billing Source)")
-wb_billing = st.file_uploader("Upload Billing Workbook (Excel)", type=['xlsx'])
-
-# 2. Templates Input
-st.subheader("2. Output Templates (Files to Populate)")
-col1, col2, col3 = st.columns(3)
-t_quart = col1.file_uploader("Quarterly Template", type=['csv', 'xlsx'])
-t_power = col2.file_uploader("Power Smart Template", type=['csv', 'xlsx'])
-t_load  = col3.file_uploader("Load Smart Template", type=['csv', 'xlsx'])
-
-# 3. Processing Logic
-if wb_billing and (t_quart or t_power or t_load):
-    try:
-        xl_billing = pd.ExcelFile(wb_billing)
-        b_sheets = xl_billing.sheet_names
+# ==========================================
+# TAB 1: SINGLE FILE MODE
+# ==========================================
+with tab_single:
+    st.markdown("### Process a single pair of files")
+    st.info("Select the billing type, upload one billing file, and one target file.")
+    
+    # 1. Configuration
+    b_type = st.selectbox("Select Billing Type", list(BILLING_CONFIG.keys()), key="single_type")
+    
+    col1, col2 = st.columns(2)
+    
+    # 2. Uploads
+    with col1:
+        st.subheader("Billing File")
+        bill_file = st.file_uploader("Upload CSV/Excel", type=['csv', 'xlsx'], key="single_bill")
         
+    with col2:
+        st.subheader("Target Template")
+        target_file = st.file_uploader("Upload Readings File", type=['csv', 'xlsx'], key="single_target")
+        
+    # 3. Process
+    if bill_file and target_file:
         st.divider()
-        st.subheader("3. Map Sheets & Process")
-        
-        # Container for jobs
-        jobs = []
-
-        # --- Job 1: Quarterly ---
-        if t_quart:
-            with st.expander("Quarterly Billing Settings", expanded=True):
-                s_q = st.selectbox("Select Billing Sheet for Quarterly:", b_sheets, key="s_q")
-                jobs.append({
-                    "type": "Quarterly Billing",
-                    "sheet": s_q,
-                    "template": t_quart
-                })
-
-        # --- Job 2: Power Smart ---
-        if t_power:
-            with st.expander("Power Smart Settings", expanded=True):
-                s_p = st.selectbox("Select Billing Sheet for Power Smart:", b_sheets, key="s_p")
-                jobs.append({
-                    "type": "Power Smart Billing",
-                    "sheet": s_p,
-                    "template": t_power
-                })
-
-        # --- Job 3: Load Smart ---
-        if t_load:
-            with st.expander("Load Smart Settings", expanded=True):
-                s_l = st.selectbox("Select Billing Sheet for Load Smart:", b_sheets, key="s_l")
-                jobs.append({
-                    "type": "Load Smart Billing",
-                    "sheet": s_l,
-                    "template": t_load
-                })
-        
-        # Run Button
-        if st.button("Process All Templates", type="primary"):
-            st.divider()
-            
-            for job in jobs:
-                btype = job["type"]
-                sheet_name = job["sheet"]
-                template_file = job["template"]
-                
-                st.markdown(f"**Processing {btype}...**")
-                
+        if st.button("Populate Single File", type="primary"):
+            with st.spinner("Processing..."):
                 try:
-                    # Load Billing Sheet
-                    # Note: Using defined header row from config
-                    df_bill = pd.read_excel(wb_billing, sheet_name=sheet_name, header=BILLING_CONFIG[btype]["header_row"])
+                    # Load Data
+                    # Note: Use config header row for billing
+                    df_b = load_file(bill_file, header=BILLING_CONFIG[b_type]["header_row"])
+                    df_t = load_file(target_file)
                     
-                    # Load Template
-                    df_temp = load_file(template_file)
-                    
-                    if df_bill is None or df_temp is None:
-                        st.error(f"Failed to read files for {btype}")
-                        continue
-                        
-                    # Process
-                    res, count, err = process_dataframes(df_bill, df_temp, btype)
-                    
-                    if err:
-                        st.error(f"❌ {btype}: {err}")
+                    if df_b is None or df_t is None:
+                        st.error("Error reading one of the files. Please check format.")
                     else:
-                        st.success(f"✅ {btype}: Updated {count} rows.")
+                        # Process
+                        res, count, err = process_dataframes(df_b, df_t, b_type)
                         
-                        # Download Button
-                        csv = res.to_csv(index=False).encode('utf-8')
-                        fname = f"Populated_{btype.replace(' ', '_')}.csv"
-                        st.download_button(f"Download {fname}", csv, fname, "text/csv")
-                        
+                        if err:
+                            st.error(f"Error: {err}")
+                        else:
+                            st.success(f"Success! Updated {count} rows.")
+                            
+                            # Preview
+                            st.dataframe(res[['Meter No.', 'Reading From', 'Reading To']].head())
+                            
+                            # Download
+                            csv = res.to_csv(index=False).encode('utf-8')
+                            fname = f"Populated_{b_type.replace(' ', '_')}.csv"
+                            st.download_button(f"Download {fname}", csv, fname, "text/csv")
+                            
                 except Exception as e:
-                    st.error(f"Error processing {btype}: {e}")
+                    st.error(f"An unexpected error occurred: {e}")
 
-    except Exception as e:
-        st.error(f"Error reading Billing Workbook: {e}")
+# ==========================================
+# TAB 2: BATCH MODE
+# ==========================================
+with tab_batch:
+    st.markdown("### Process multiple types from one Workbook")
+    st.info("Upload ONE Billing Workbook (with multiple sheets) and THREE Target Templates.")
 
-elif not wb_billing:
-    st.info("Please upload the Billing Workbook to start.")
+    # 1. Billing Input
+    st.subheader("1. Input Data (Billing Source)")
+    wb_billing = st.file_uploader("Upload Billing Workbook (Excel)", type=['xlsx'], key="batch_wb")
+
+    # 2. Templates Input
+    st.subheader("2. Output Templates (Files to Populate)")
+    col_q, col_p, col_l = st.columns(3)
+    t_quart = col_q.file_uploader("Quarterly Template", type=['csv', 'xlsx'], key="batch_t_q")
+    t_power = col_p.file_uploader("Power Smart Template", type=['csv', 'xlsx'], key="batch_t_p")
+    t_load  = col_l.file_uploader("Load Smart Template", type=['csv', 'xlsx'], key="batch_t_l")
+
+    # 3. Mapping & Processing
+    if wb_billing and (t_quart or t_power or t_load):
+        try:
+            # Read Sheet Names
+            xl_billing = pd.ExcelFile(wb_billing)
+            b_sheets = xl_billing.sheet_names
+            
+            st.divider()
+            st.subheader("3. Map Sheets & Process")
+            
+            # Container for jobs
+            jobs = []
+
+            # --- Job 1: Quarterly ---
+            if t_quart:
+                with st.expander("Quarterly Billing Settings", expanded=True):
+                    s_q = st.selectbox("Select Billing Sheet for Quarterly:", b_sheets, key="sheet_q")
+                    jobs.append({
+                        "type": "Quarterly Billing",
+                        "sheet": s_q,
+                        "template": t_quart
+                    })
+
+            # --- Job 2: Power Smart ---
+            if t_power:
+                with st.expander("Power Smart Settings", expanded=True):
+                    s_p = st.selectbox("Select Billing Sheet for Power Smart:", b_sheets, key="sheet_p")
+                    jobs.append({
+                        "type": "Power Smart Billing",
+                        "sheet": s_p,
+                        "template": t_power
+                    })
+
+            # --- Job 3: Load Smart ---
+            if t_load:
+                with st.expander("Load Smart Settings", expanded=True):
+                    s_l = st.selectbox("Select Billing Sheet for Load Smart:", b_sheets, key="sheet_l")
+                    jobs.append({
+                        "type": "Load Smart Billing",
+                        "sheet": s_l,
+                        "template": t_load
+                    })
+            
+            # Run Button
+            if st.button("Process All Templates", type="primary"):
+                st.divider()
+                
+                for job in jobs:
+                    btype = job["type"]
+                    sheet_name = job["sheet"]
+                    template_file = job["template"]
+                    
+                    st.markdown(f"**Processing {btype}...**")
+                    
+                    try:
+                        # Load Billing Sheet
+                        df_bill = pd.read_excel(wb_billing, sheet_name=sheet_name, header=BILLING_CONFIG[btype]["header_row"])
+                        
+                        # Load Template
+                        df_temp = load_file(template_file)
+                        
+                        if df_bill is None or df_temp is None:
+                            st.error(f"Failed to read files for {btype}")
+                            continue
+                            
+                        # Process
+                        res, count, err = process_dataframes(df_bill, df_temp, btype)
+                        
+                        if err:
+                            st.error(f"❌ {btype}: {err}")
+                        else:
+                            st.success(f"✅ {btype}: Updated {count} rows.")
+                            
+                            # Download Button
+                            csv = res.to_csv(index=False).encode('utf-8')
+                            fname = f"Populated_{btype.replace(' ', '_')}.csv"
+                            st.download_button(f"Download {fname}", csv, fname, "text/csv", key=f"dl_{btype}")
+                            
+                    except Exception as e:
+                        st.error(f"Error processing {btype}: {e}")
+
+        except Exception as e:
+            st.error(f"Error reading Billing Workbook: {e}")
+
+    elif not wb_billing:
+        st.info("Please upload the Billing Workbook to start Batch Mode.")
