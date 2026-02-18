@@ -3,9 +3,15 @@ import pandas as pd
 import io
 
 # --- Configuration ---
-# Only defining Power Smart logic here as requested, 
-# but keeping structure expandable.
 BILLING_CONFIG = {
+    "Quarterly Billing": {
+        "header_row": 1,
+        "col_nmi": "NMI",
+        "suffixes": {
+            "P": {"start": "PEAK_KWH", "end": "PEAK_KWH.1"},
+            "A": {"qty": "Availability charge Quantity"}
+        }
+    },
     "Power Smart Billing": {
         "header_row": 1,
         "col_nmi": "NMI",
@@ -16,7 +22,6 @@ BILLING_CONFIG = {
             "A": {"qty": "Availability"}
         }
     },
-    # Kept for compatibility if needed later
     "Load Smart Billing": {
         "header_row": 1,
         "col_nmi": "NMI",
@@ -27,14 +32,6 @@ BILLING_CONFIG = {
             "D": {"qty": "DEMAND"},
             "A": {"qty": "Availability"}
         }
-    },
-     "Quarterly Billing": {
-        "header_row": 1,
-        "col_nmi": "NMI",
-        "suffixes": {
-            "P": {"start": "PEAK_KWH", "end": "PEAK_KWH.1"},
-            "A": {"qty": "Availability charge Quantity"}
-        }
     }
 }
 
@@ -42,91 +39,69 @@ def clean_nmi(val):
     """Robust cleaner for NMI strings."""
     if pd.isna(val):
         return ""
-    # Convert to string
     s = str(val).strip()
-    # Remove decimal .0 if it exists (common in Excel imports)
     if s.endswith(".0"):
         s = s[:-2]
     return s
 
-def process_meter_readings(billing_file, readings_file, billing_type):
+def process_dataframes(df_billing, df_target, billing_type):
+    """
+    Core logic to map billing dataframe to target dataframe.
+    Returns: (Result DataFrame, Match Count, Error Message)
+    """
     config = BILLING_CONFIG[billing_type]
     
-    # 1. Load Billing Data
-    try:
-        if billing_file.name.endswith('.csv'):
-            df_billing = pd.read_csv(billing_file, header=config["header_row"])
-        else:
-            df_billing = pd.read_excel(billing_file, header=config["header_row"])
-    except Exception as e:
-        return None, f"Error reading billing file: {e}"
+    # 1. Verify NMI column exists in Billing
+    if config["col_nmi"] not in df_billing.columns:
+         return None, 0, f"Missing '{config['col_nmi']}' column in billing data."
 
-    # 2. Load Target File
-    try:
-        if readings_file.name.endswith('.csv'):
-            df_target = pd.read_csv(readings_file)
-        else:
-            df_target = pd.read_excel(readings_file)
-    except Exception as e:
-        return None, f"Error reading target file: {e}"
+    # 2. Verify Target Columns
+    if 'Meter No.' not in df_target.columns:
+        return None, 0, "Target data must have 'Meter No.' column."
 
-    # 3. Build Lookup Dictionary
-    # Key = Clean NMI, Value = Data Dictionary
+    # 3. Build Lookup
     billing_lookup = {}
     suffixes_config = config["suffixes"]
 
     for index, row in df_billing.iterrows():
         nmi_val = row.get(config["col_nmi"])
         nmi_clean = clean_nmi(nmi_val)
-        
-        if not nmi_clean:
-            continue
+        if not nmi_clean: continue
             
-        # Store data for this NMI
         nmi_data = {}
         for suffix, mapping in suffixes_config.items():
-            if "start" in mapping: # Reading Range
+            if "start" in mapping:
                 nmi_data[suffix] = {
                     "start": row.get(mapping["start"]),
                     "end": row.get(mapping["end"])
                 }
-            elif "qty" in mapping: # Quantity
+            elif "qty" in mapping:
                 nmi_data[suffix] = {
                     "qty": row.get(mapping["qty"])
                 }
-        
         billing_lookup[nmi_clean] = nmi_data
 
     # 4. Update Target
     matches_found = 0
-    
     # Ensure columns exist
-    if 'Reading From' not in df_target.columns:
-        df_target['Reading From'] = None
-    if 'Reading To' not in df_target.columns:
-        df_target['Reading To'] = None
-        
+    if 'Reading From' not in df_target.columns: df_target['Reading From'] = None
+    if 'Reading To' not in df_target.columns: df_target['Reading To'] = None
+
     for index, row in df_target.iterrows():
         meter_val = row.get('Meter No.')
         meter_clean = clean_nmi(meter_val)
         
-        if len(meter_clean) < 2:
-            continue
+        if len(meter_clean) < 2: continue
             
-        # Extract NMI and Suffix
-        # Logic: Suffix is the last character. NMI is everything before it.
         suffix = meter_clean[-1]
         nmi_base = meter_clean[:-1]
         
-        # Check if we have data for this NMI
         if nmi_base in billing_lookup:
             nmi_data = billing_lookup[nmi_base]
-            
-            # Check if we have data for this Suffix (A, P, S, O, etc.)
             if suffix in nmi_data:
                 data = nmi_data[suffix]
                 
-                # Apply Quantity Logic (Avail/Demand)
+                # Qty Logic
                 if "qty" in data:
                     val = data["qty"]
                     if pd.notna(val):
@@ -134,11 +109,10 @@ def process_meter_readings(billing_file, readings_file, billing_type):
                         df_target.at[index, 'Reading To'] = val
                         matches_found += 1
                         
-                # Apply Reading Logic (Peak/Shoulder/OffPeak)
+                # Reading Logic
                 elif "start" in data:
                     s_val = data["start"]
                     e_val = data["end"]
-                    
                     updated = False
                     if pd.notna(s_val):
                         df_target.at[index, 'Reading From'] = s_val
@@ -146,34 +120,127 @@ def process_meter_readings(billing_file, readings_file, billing_type):
                     if pd.notna(e_val):
                         df_target.at[index, 'Reading To'] = e_val
                         updated = True
-                        
                     if updated:
                         matches_found += 1
+                        
+    return df_target, matches_found, None
 
-    return df_target, matches_found
+def load_file(uploaded_file):
+    """Helper to load csv or excel"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception as e:
+        return None
 
 # --- UI ---
-st.set_page_config(page_title="Meter Mapper")
+st.set_page_config(page_title="Meter Mapper", layout="wide")
 st.title("⚡ Meter Reading Populator")
+st.markdown("""
+### Batch Processing
+1. Upload **ONE Billing Workbook** (containing multiple sheets).
+2. Upload **THREE Template Files** (Target Readings).
+3. Map the Billing Sheet to the Template.
+""")
 
-st.markdown("Matches billing data NMI to target file Meter No (NMI + Suffix).")
+st.divider()
 
-billing_type = st.selectbox("Select Billing Type", list(BILLING_CONFIG.keys()))
+# 1. Billing Input
+st.subheader("1. Input Data (Billing Source)")
+wb_billing = st.file_uploader("Upload Billing Workbook (Excel)", type=['xlsx'])
 
-col1, col2 = st.columns(2)
-billing_file = col1.file_uploader("Billing File", type=['csv', 'xlsx'])
-readings_file = col2.file_uploader("Target Readings File", type=['csv', 'xlsx'])
+# 2. Templates Input
+st.subheader("2. Output Templates (Files to Populate)")
+col1, col2, col3 = st.columns(3)
+t_quart = col1.file_uploader("Quarterly Template", type=['csv', 'xlsx'])
+t_power = col2.file_uploader("Power Smart Template", type=['csv', 'xlsx'])
+t_load  = col3.file_uploader("Load Smart Template", type=['csv', 'xlsx'])
 
-if billing_file and readings_file:
-    if st.button("Populate"):
-        with st.spinner("Processing..."):
-            res_df, count = process_meter_readings(billing_file, readings_file, billing_type)
+# 3. Processing Logic
+if wb_billing and (t_quart or t_power or t_load):
+    try:
+        xl_billing = pd.ExcelFile(wb_billing)
+        b_sheets = xl_billing.sheet_names
+        
+        st.divider()
+        st.subheader("3. Map Sheets & Process")
+        
+        # Container for jobs
+        jobs = []
+
+        # --- Job 1: Quarterly ---
+        if t_quart:
+            with st.expander("Quarterly Billing Settings", expanded=True):
+                s_q = st.selectbox("Select Billing Sheet for Quarterly:", b_sheets, key="s_q")
+                jobs.append({
+                    "type": "Quarterly Billing",
+                    "sheet": s_q,
+                    "template": t_quart
+                })
+
+        # --- Job 2: Power Smart ---
+        if t_power:
+            with st.expander("Power Smart Settings", expanded=True):
+                s_p = st.selectbox("Select Billing Sheet for Power Smart:", b_sheets, key="s_p")
+                jobs.append({
+                    "type": "Power Smart Billing",
+                    "sheet": s_p,
+                    "template": t_power
+                })
+
+        # --- Job 3: Load Smart ---
+        if t_load:
+            with st.expander("Load Smart Settings", expanded=True):
+                s_l = st.selectbox("Select Billing Sheet for Load Smart:", b_sheets, key="s_l")
+                jobs.append({
+                    "type": "Load Smart Billing",
+                    "sheet": s_l,
+                    "template": t_load
+                })
+        
+        # Run Button
+        if st.button("Process All Templates", type="primary"):
+            st.divider()
             
-            if res_df is None:
-                st.error(count) # Error message
-            else:
-                st.success(f"Done! Updated {count} rows.")
-                st.dataframe(res_df.head())
+            for job in jobs:
+                btype = job["type"]
+                sheet_name = job["sheet"]
+                template_file = job["template"]
                 
-                csv = res_df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download CSV", csv, "Populated_Readings.csv", "text/csv")
+                st.markdown(f"**Processing {btype}...**")
+                
+                try:
+                    # Load Billing Sheet
+                    # Note: Using defined header row from config
+                    df_bill = pd.read_excel(wb_billing, sheet_name=sheet_name, header=BILLING_CONFIG[btype]["header_row"])
+                    
+                    # Load Template
+                    df_temp = load_file(template_file)
+                    
+                    if df_bill is None or df_temp is None:
+                        st.error(f"Failed to read files for {btype}")
+                        continue
+                        
+                    # Process
+                    res, count, err = process_dataframes(df_bill, df_temp, btype)
+                    
+                    if err:
+                        st.error(f"❌ {btype}: {err}")
+                    else:
+                        st.success(f"✅ {btype}: Updated {count} rows.")
+                        
+                        # Download Button
+                        csv = res.to_csv(index=False).encode('utf-8')
+                        fname = f"Populated_{btype.replace(' ', '_')}.csv"
+                        st.download_button(f"Download {fname}", csv, fname, "text/csv")
+                        
+                except Exception as e:
+                    st.error(f"Error processing {btype}: {e}")
+
+    except Exception as e:
+        st.error(f"Error reading Billing Workbook: {e}")
+
+elif not wb_billing:
+    st.info("Please upload the Billing Workbook to start.")
